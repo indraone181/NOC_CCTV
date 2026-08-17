@@ -54,6 +54,86 @@ class PingInput(BaseModel):
     ip: str
     port: int = 80
 
+class SettingsInput(BaseModel):
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    telegram_enabled: bool = False
+    alert_threshold_minutes: int = 5
+
+class TelegramTestInput(BaseModel):
+    message: str = ""
+
+async def get_settings():
+    doc = await db.settings.find_one({"id": "global"}, {"_id": 0})
+    return doc or {"id": "global", "telegram_bot_token": "", "telegram_chat_id": "", "telegram_enabled": False, "alert_threshold_minutes": 5}
+
+async def send_telegram(text, token=None, chat_id=None):
+    if not token or not chat_id:
+        s = await get_settings()
+        token = token or s.get("telegram_bot_token")
+        chat_id = chat_id or s.get("telegram_chat_id")
+    if not token or not chat_id:
+        raise HTTPException(400, "Telegram belum dikonfigurasi")
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    resp = await asyncio.to_thread(requests.post, url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=6)
+    if resp.status_code >= 400:
+        raise HTTPException(400, f"Telegram error: {resp.text[:200]}")
+    return resp.json()
+
+async def process_alerts_and_history(items):
+    now = datetime.now(timezone.utc)
+    day = now.strftime("%Y-%m-%d")
+    settings = await get_settings()
+    telegram_ok = settings.get("telegram_enabled") and settings.get("telegram_bot_token") and settings.get("telegram_chat_id")
+    threshold = float(settings.get("alert_threshold_minutes", 5))
+    daily_ops, cam_ops, alerts = [], [], []
+    for item in items:
+        is_online = 1 if item.get("status") == "online" else 0
+        daily_ops.append(UpdateOne(
+            {"camera_id": item["id"], "day": day},
+            {"$inc": {"total": 1, "online": is_online}, "$setOnInsert": {"camera_id": item["id"], "camera_name": item.get("name"), "day": day}},
+            upsert=True,
+        ))
+        offline_since = item.get("offline_since")
+        alert_sent_at = item.get("alert_sent_at")
+        update_set, update_unset = {}, {}
+        if item.get("status") == "offline":
+            if not offline_since:
+                offline_since = now.isoformat()
+                update_set["offline_since"] = offline_since
+                item["offline_since"] = offline_since
+            try:
+                elapsed_min = (now - datetime.fromisoformat(offline_since)).total_seconds() / 60
+            except Exception:
+                elapsed_min = 0
+            if telegram_ok and elapsed_min >= threshold and (not alert_sent_at or alert_sent_at < offline_since):
+                alerts.append(("down", item))
+                update_set["alert_sent_at"] = now.isoformat()
+        else:
+            if offline_since or alert_sent_at:
+                if telegram_ok and offline_since:
+                    alerts.append(("up", item))
+                update_unset["offline_since"] = ""
+                update_unset["alert_sent_at"] = ""
+        if update_set or update_unset:
+            doc = {}
+            if update_set: doc["$set"] = update_set
+            if update_unset: doc["$unset"] = update_unset
+            cam_ops.append(UpdateOne({"id": item["id"]}, doc))
+    if daily_ops:
+        await db.camera_daily.bulk_write(daily_ops)
+    if cam_ops:
+        await db.cameras.bulk_write(cam_ops)
+    for kind, item in alerts:
+        try:
+            if kind == "down":
+                text = f"🚨 <b>CCTV DOWN</b>\n<b>{item.get('name')}</b>\nIP: <code>{item.get('ip')}</code>\nLokasi: {item.get('location','-')}\nOffline sejak: {str(item.get('offline_since',''))[:19].replace('T',' ')} UTC"
+            else:
+                text = f"✅ <b>CCTV RECOVERED</b>\n<b>{item.get('name')}</b>\nIP: <code>{item.get('ip')}</code>\nOnline kembali."
+            await send_telegram(text, token=settings["telegram_bot_token"], chat_id=settings["telegram_chat_id"])
+        except Exception:
+            pass
+
 async def record_availability(items):
     total = len(items)
     online = sum(item.get("status") == "online" for item in items)
@@ -173,6 +253,7 @@ async def refresh_cameras(user=Depends(current_user)):
             if updates:
                 await db.cameras.bulk_write(updates)
             await record_availability(items)
+            await process_alerts_and_history(items)
             return items
         except Exception:
             pass
@@ -185,6 +266,7 @@ async def refresh_cameras(user=Depends(current_user)):
     if updates:
         await db.cameras.bulk_write(updates)
     await record_availability(checked)
+    await process_alerts_and_history(checked)
     return checked
 
 @api.post("/ping")
@@ -209,6 +291,82 @@ async def availability_history(user=Depends(current_user)):
 async def export_report(user=Depends(current_user)):
     data = await db.cameras.find({}, {"_id": 0}).to_list(1000); out = io.StringIO(); writer = csv.DictWriter(out, fieldnames=["id", "name", "ip", "nvr", "location", "status", "latency_ms", "last_checked"], extrasaction="ignore"); writer.writeheader(); writer.writerows(data)
     return StreamingResponse(iter([out.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=noc-cctv-report.csv"})
+
+@api.get("/reports/camera-uptime")
+async def camera_uptime(days: int = 7, user=Depends(current_user)):
+    days = max(1, min(int(days), 60))
+    from_day = (datetime.now(timezone.utc) - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+    docs = await db.camera_daily.find({"day": {"$gte": from_day}}, {"_id": 0}).sort([("camera_id", 1), ("day", 1)]).to_list(20000)
+    cameras = {c["id"]: c for c in await db.cameras.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(2000)}
+    grouped = {}
+    for d in docs:
+        cid = d["camera_id"]
+        if cid not in grouped:
+            grouped[cid] = {"camera_id": cid, "camera_name": cameras.get(cid, {}).get("name") or d.get("camera_name") or cid, "days": []}
+        uptime = round(d["online"] / d["total"] * 100, 1) if d.get("total") else 0
+        grouped[cid]["days"].append({"day": d["day"], "uptime": uptime, "total": d.get("total", 0), "online": d.get("online", 0)})
+    return list(grouped.values())
+
+@api.get("/settings")
+async def get_settings_api(user=Depends(admin_only)):
+    s = await get_settings()
+    token = s.get("telegram_bot_token") or ""
+    return {
+        "telegram_bot_token_masked": (token[:6] + "…" + token[-4:]) if len(token) > 12 else ("***" if token else ""),
+        "telegram_bot_token_set": bool(token),
+        "telegram_chat_id": s.get("telegram_chat_id", ""),
+        "telegram_enabled": bool(s.get("telegram_enabled")),
+        "alert_threshold_minutes": int(s.get("alert_threshold_minutes", 5)),
+    }
+
+@api.put("/settings")
+async def update_settings(payload: SettingsInput, user=Depends(admin_only)):
+    doc = payload.model_dump(); doc["id"] = "global"
+    if not doc.get("telegram_bot_token"):
+        existing = await get_settings()
+        doc["telegram_bot_token"] = existing.get("telegram_bot_token", "")
+    if int(doc.get("alert_threshold_minutes", 5)) < 1:
+        doc["alert_threshold_minutes"] = 1
+    await db.settings.update_one({"id": "global"}, {"$set": doc}, upsert=True)
+    return {"ok": True}
+
+@api.post("/settings/telegram/test")
+async def test_telegram(payload: TelegramTestInput, user=Depends(admin_only)):
+    msg = payload.message or "🚨 Test NOC Sentinel: koneksi Telegram berhasil."
+    result = await send_telegram(msg)
+    return {"ok": True, "response": result}
+
+@api.post("/cameras/import")
+async def import_cameras(request: Request, user=Depends(admin_only)):
+    form = await request.form()
+    file = form.get("file")
+    if not file or not hasattr(file, "read"):
+        raise HTTPException(400, "File CSV wajib diunggah dengan field name 'file'")
+    raw = await file.read()
+    try:
+        content = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        content = raw.decode("utf-8", errors="ignore")
+    reader = csv.DictReader(io.StringIO(content))
+    inserted, skipped, errors = 0, 0, []
+    for idx, row in enumerate(reader, start=2):
+        name = (row.get("name") or "").strip()
+        ip = (row.get("ip") or "").strip()
+        if not name or not ip:
+            skipped += 1; errors.append(f"Baris {idx}: name/ip kosong"); continue
+        item = {
+            "id": (row.get("id") or "").strip() or str(uuid.uuid4()),
+            "name": name, "ip": ip,
+            "nvr": (row.get("nvr") or "NVR").strip(),
+            "location": (row.get("location") or "Main Site").strip(),
+            "picture_url": (row.get("picture_url") or "").strip(),
+            "status": "unknown", "latency_ms": None, "last_checked": None,
+        }
+        try:
+            await db.cameras.insert_one(item); inserted += 1
+        except Exception as exc:
+            skipped += 1; errors.append(f"Baris {idx}: {str(exc)[:80]}")
+    return {"inserted": inserted, "skipped": skipped, "errors": errors[:10]}
 
 @api.get("/users")
 async def users(user=Depends(admin_only)):
