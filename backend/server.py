@@ -20,6 +20,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
+from pymongo import UpdateOne
 
 mongo = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = mongo[os.environ["DB_NAME"]]
@@ -141,6 +142,7 @@ async def cameras(user=Depends(current_user)):
 async def add_camera(payload: CameraInput, user=Depends(admin_only)):
     item = payload.model_dump(); item["id"] = item.get("id") or str(uuid.uuid4()); item["status"] = "unknown"; item["latency_ms"] = None; item["last_checked"] = None
     await db.cameras.insert_one(item)
+    item.pop("_id", None)
     return item
 
 @api.put("/cameras/{camera_id}")
@@ -161,12 +163,15 @@ async def refresh_cameras(user=Depends(current_user)):
             response = await asyncio.to_thread(requests.get, status_url, timeout=4)
             remote = response.json().get("cameras", [])
             by_ip = {item.get("ip"): item for item in remote}
+            updates = []
             for item in items:
                 if item["ip"] in by_ip and by_ip[item["ip"]].get("status"):
                     item["status"] = by_ip[item["ip"]]["status"]
                     item["picture_url"] = by_ip[item["ip"]].get("picture_url", item.get("picture_url", ""))
                     item["last_checked"] = datetime.now(timezone.utc).isoformat()
-                    await db.cameras.update_one({"id": item["id"]}, {"$set": {"status": item["status"], "picture_url": item["picture_url"], "last_checked": item["last_checked"]}})
+                    updates.append(UpdateOne({"id": item["id"]}, {"$set": {"status": item["status"], "picture_url": item["picture_url"], "last_checked": item["last_checked"]}}))
+            if updates:
+                await db.cameras.bulk_write(updates)
             await record_availability(items)
             return items
         except Exception:
@@ -174,9 +179,11 @@ async def refresh_cameras(user=Depends(current_user)):
     async def check(item):
         online, latency = await ping_host(item["ip"])
         item.update({"status": "online" if online else "offline", "latency_ms": latency, "last_checked": datetime.now(timezone.utc).isoformat()})
-        await db.cameras.update_one({"id": item["id"]}, {"$set": {"status": item["status"], "latency_ms": latency, "last_checked": item["last_checked"]}})
         return item
     checked = await asyncio.gather(*[check(item) for item in items])
+    updates = [UpdateOne({"id": item["id"]}, {"$set": {"status": item["status"], "latency_ms": item["latency_ms"], "last_checked": item["last_checked"]}}) for item in checked]
+    if updates:
+        await db.cameras.bulk_write(updates)
     await record_availability(checked)
     return checked
 
@@ -200,7 +207,7 @@ async def availability_history(user=Depends(current_user)):
 
 @api.get("/reports/export")
 async def export_report(user=Depends(current_user)):
-    data = await db.cameras.find({}, {"_id": 0}).to_list(1000); out = io.StringIO(); writer = csv.DictWriter(out, fieldnames=["id", "name", "ip", "nvr", "location", "status", "latency_ms", "last_checked"]); writer.writeheader(); writer.writerows(data)
+    data = await db.cameras.find({}, {"_id": 0}).to_list(1000); out = io.StringIO(); writer = csv.DictWriter(out, fieldnames=["id", "name", "ip", "nvr", "location", "status", "latency_ms", "last_checked"], extrasaction="ignore"); writer.writeheader(); writer.writerows(data)
     return StreamingResponse(iter([out.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=noc-cctv-report.csv"})
 
 @api.get("/users")
@@ -218,11 +225,30 @@ async def add_user(payload: UserInput, user=Depends(admin_only)):
 
 app = FastAPI(title="NOC Sentinel")
 app.include_router(api)
-app.add_middleware(CORSMiddleware, allow_origins=[origin for origin in os.environ.get("CORS_ORIGINS", "").split(",") if origin and origin != "*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+allowed_origins = [origin.strip() for origin in os.environ.get("CORS_ORIGINS", "").split(",") if origin.strip() and origin.strip() != "*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_origin_regex=r"^https?://([a-zA-Z0-9.-]+|\[[0-9a-fA-F:]+\])(:\d+)?$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.on_event("startup")
 async def startup():
     await db.users.create_index("email", unique=True)
+    seed_email = os.environ.get("SEED_ADMIN_EMAIL")
+    seed_password = os.environ.get("SEED_ADMIN_PASSWORD")
+    if seed_email and seed_password and await db.users.count_documents({}) == 0:
+        await db.users.insert_one({
+            "id": str(uuid.uuid4()),
+            "email": seed_email.lower().strip(),
+            "name": os.environ.get("SEED_ADMIN_NAME", "NOC Administrator"),
+            "role": "admin",
+            "password_hash": bcrypt.hashpw(seed_password.encode(), bcrypt.gensalt()).decode(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
     if await db.cameras.count_documents({}) == 0:
         seed = [{"id": f"NVR-91-{i}", "ip": ip, "name": name, "nvr": "NVR-91", "picture_url": picture, "location": "FA Parkiran", "status": "unknown", "latency_ms": None, "last_checked": None} for i, (ip, name, picture) in enumerate([("10.187.17.159", "FA-PARKIRAN_HD_ARDECON1-FIX", "http://10.2.187.91:80/ISAPI/Streaming/channels/101/picture"), ("10.187.17.160", "FA-PARKIRAN_HD_ARDECON2-FIX", "http://10.2.187.91:80/ISAPI/Streaming/channels/201/picture"), ("10.187.17.161", "FA-PARKIRAN_ARDECON-FIX", "http://10.2.187.91:80/ISAPI/Streaming/channels/301/picture"), ("10.187.8.150", "MC-MAINWS_1-FIX", "http://10.2.187.91:80/ISAPI/Streaming/channels/401/picture"), ("10.187.8.155", "MC-WS_SSE1-FIX", "http://10.2.187.91:80/ISAPI/Streaming/channels/501/picture")], 1)]
         await db.cameras.insert_many(seed)

@@ -1,0 +1,37 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: noc-mongo
+    restart: unless-stopped
+    volumes:
+      - noc_mongo_data:/data/db
+    networks:
+      - noc
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: noc-app
+    restart: unless-stopped
+    depends_on:
+      - mongo
+    environment:
+      MONGO_URL: "mongodb://mongo:27017"
+      DB_NAME: "noc_dashboard"
+      JWT_SECRET: "change-me-to-a-long-random-secret"
+      CORS_ORIGINS: "*"
+      SEED_ADMIN_EMAIL: "admin@noc.local"
+      SEED_ADMIN_PASSWORD: "admin12345"
+      SEED_ADMIN_NAME: "NOC Administrator"
+    ports:
+      - "6678:6678"
+    networks:
+      - noc
+
+networks:
+  noc:
+    driver: bridge
+
+volumes:
+  noc_mongo_data:
