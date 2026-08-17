@@ -1,0 +1,66 @@
+{
+  "project_name": "NOC Sentinel - CCTV & Network Monitoring Operations Center",
+  "archetype": "The Performance Pro / Technical Command Center",
+  "theme": "Dark High-Contrast Tactical NOC",
+  "typography": {
+    "heading": "Barlow Condensed, sans-serif",
+    "body": "Inter, sans-serif",
+    "mono": "JetBrains Mono, monospace"
+  },
+  "colors": {
+    "background": "#090B10",
+    "surface": "#121620",
+    "surface_hover": "#1A2030",
+    "border": "#222D42",
+    "primary": "#00E5FF",
+    "secondary": "#3B82F6",
+    "accent_success": "#10B981",
+    "accent_warning": "#F59E0B",
+    "accent_danger": "#EF4444",
+    "text_main": "#F8FAFC",
+    "text_muted": "#94A3B8"
+  },
+  "visual_enhancers": {
+    "borders": "1px solid #222D42",
+    "shadows": "0 10px 30px -10px rgba(0, 0, 0, 0.5)",
+    "radius": "6px",
+    "glow": "0 0 15px rgba(0, 229, 255, 0.15)"
+  },
+  "layouts": {
+    "dashboard_grid": "grid-cols-1 md:grid-cols-4 lg:grid-cols-12 gap-6",
+    "sidebar_width": "260px"
+  },
+  "motion": {
+    "transition": "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)"
+  },
+  "accessibility": {
+    "contrast_ratio": "WCAG AA compliant (>4.5:1 for normal text)",
+    "focus_state": "focus:ring-2 focus:ring-[#00E5FF] focus:outline-none"
+  },
+  "image_urls": [
+    {
+      "category": "noc_control_room",
+      "url": "https://images.unsplash.com/photo-1780299511230-099abe21bf38?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2OTV8MHwxfHNlYXJjaHwxfHxjY3R2JTIwc2VjdXJpdHklMjBjb250cm9sJTIwcm9vbSUyMG1vbml0b3J8ZW58MHx8fHwxNzg2OTQ2MDk2fDA&ixlib=rb-4.1.0&q=85",
+      "description": "NOC security control room monitor display"
+    },
+    {
+      "category": "network_operations",
+      "url": "https://images.pexels.com/photos/19317897/pexels-photo-19317897.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "Modern network control center with digital displays"
+    }
+  ],
+  "key_functionalities": [
+    "Live CCTV & NVR Status Dashboard with grid/list view and stream simulation",
+    "Network Ping Tool with live latency testing, packet loss stats, and history log",
+    "Availability Reports for CCTV uptime and Network packet availability with CSV/PDF export",
+    "CCTV & NVR CRUD (Add, Edit, Delete, Check Status, Filter)",
+    "Multi-user Login & Role Management (Admin vs Operator with permission controls)",
+    "Single-container Docker architecture running backend and frontend on port 6678"
+  ],
+  "universal_guidelines": [
+    "All interactive elements must include data-testid attributes",
+    "Use dark tactical theme without generic pure black gradients",
+    "Never use full transparent overlays without proper contrast",
+    "Maintain high scanability with badge indicators for Online/Offline status"
+  ]
+}
