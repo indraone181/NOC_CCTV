@@ -138,6 +138,31 @@ def test_ping_offline(admin_client):
     body = r.json()
     assert body['status'] == 'offline'
     assert body['ip'] == '127.0.0.1'
+    assert body.get('target') == '127.0.0.1:1'
+
+
+def test_ping_no_port_uses_smart_ping_online(admin_client):
+    # No port → smart_ping (ICMP → TCP fallback). 8.8.8.8 reachable via TCP:443 in preview.
+    r = admin_client.post(f'{BASE_URL}/api/ping', json={'ip': '8.8.8.8'}, timeout=20)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body['status'] == 'online', f"expected online, got {body}"
+    assert body['ip'] == '8.8.8.8'
+    assert body['latency_ms'] is not None and body['latency_ms'] > 0
+    assert body.get('target') == '8.8.8.8'  # no :port suffix
+    assert body.get('port') in (None, 0) or 'port' in body  # port may be null when not provided
+
+
+def test_ping_with_port_backward_compat(admin_client):
+    # Explicit port=80 still uses TCP ping_host and target has :port suffix
+    r = admin_client.post(f'{BASE_URL}/api/ping', json={'ip': '8.8.8.8', 'port': 443}, timeout=15)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body['ip'] == '8.8.8.8'
+    assert body['port'] == 443
+    assert body.get('target') == '8.8.8.8:443'
+    assert body['status'] == 'online'
+    assert body['latency_ms'] is not None and body['latency_ms'] > 0
 
 
 # Reports

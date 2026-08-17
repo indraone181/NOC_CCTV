@@ -1,1 +1,2 @@
 cron=3.0pl1-162
+iputils-ping=3:20221126-1+deb12u1

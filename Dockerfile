@@ -9,6 +9,9 @@ RUN yarn build
 
 FROM python:3.11-slim
 WORKDIR /app
+# Install iputils-ping for ICMP ping (used by /api/ping endpoint)
+RUN apt-get update && apt-get install -y --no-install-recommends iputils-ping \
+    && rm -rf /var/lib/apt/lists/*
 # Slim runtime deps only (no pytest/black/mypy/pandas/boto3/etc.)
 COPY backend/requirements-prod.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt

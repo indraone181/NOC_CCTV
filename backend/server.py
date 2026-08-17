@@ -52,7 +52,7 @@ class UserInput(BaseModel):
 
 class PingInput(BaseModel):
     ip: str
-    port: int = 80
+    port: Optional[int] = None
 
 class SettingsInput(BaseModel):
     telegram_bot_token: str = ""
@@ -181,6 +181,40 @@ async def ping_host(ip: str, port: int = 80):
     except Exception:
         return False, None
 
+async def icmp_ping(ip: str):
+    started = datetime.now(timezone.utc)
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ping", "-c", "1", "-W", "2", ip,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        rc = await asyncio.wait_for(proc.wait(), timeout=3.0)
+        if rc == 0:
+            return True, round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 1)
+        # rc != 0 could be "host unreachable" OR "permission denied" — treat as inconclusive → fallback
+        return None, None
+    except FileNotFoundError:
+        return None, None
+    except Exception:
+        if proc:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        return None, None
+
+async def smart_ping(ip: str):
+    """ICMP first, fallback to TCP:80 when ICMP is unavailable/blocked."""
+    ok, latency = await icmp_ping(ip)
+    if ok is None:
+        for port in (80, 443, 8080, 22):
+            tcp_ok, tcp_latency = await ping_host(ip, port)
+            if tcp_ok:
+                return True, tcp_latency
+        return False, None
+    return ok, latency
+
 @api.get("/setup/status")
 async def setup_status():
     return {"needs_setup": await db.users.count_documents({}) == 0}
@@ -271,8 +305,13 @@ async def refresh_cameras(user=Depends(current_user)):
 
 @api.post("/ping")
 async def ping(payload: PingInput, user=Depends(current_user)):
-    online, latency = await ping_host(payload.ip, payload.port)
-    result = {"ip": payload.ip, "port": payload.port, "status": "online" if online else "offline", "latency_ms": latency, "checked_at": datetime.now(timezone.utc).isoformat()}
+    if payload.port:
+        online, latency = await ping_host(payload.ip, payload.port)
+        label = f"{payload.ip}:{payload.port}"
+    else:
+        online, latency = await smart_ping(payload.ip)
+        label = payload.ip
+    result = {"ip": payload.ip, "port": payload.port, "target": label, "status": "online" if online else "offline", "latency_ms": latency, "checked_at": datetime.now(timezone.utc).isoformat()}
     await db.ping_history.insert_one({"id": str(uuid.uuid4()), **result})
     return result
 
