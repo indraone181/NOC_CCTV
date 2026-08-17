@@ -375,6 +375,19 @@ async def test_telegram(payload: TelegramTestInput, user=Depends(admin_only)):
     result = await send_telegram(msg)
     return {"ok": True, "response": result}
 
+@api.get("/cameras/import/template")
+async def import_template(user=Depends(current_user)):
+    rows = [
+        ["name", "ip", "nvr", "location", "picture_url"],
+        ["FA-PARKIRAN_CAM_01", "10.187.17.159", "NVR-91", "FA Parkiran", "http://10.2.187.91:80/ISAPI/Streaming/channels/101/picture"],
+        ["FA-PARKIRAN_CAM_02", "10.187.17.160", "NVR-91", "FA Parkiran", "http://10.2.187.91:80/ISAPI/Streaming/channels/201/picture"],
+        ["MC-MAINWS_1", "10.187.8.150", "NVR-92", "Main Site", ""],
+    ]
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerows(rows)
+    return StreamingResponse(iter([out.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=noc-cctv-import-template.csv"})
+
 @api.post("/cameras/import")
 async def import_cameras(request: Request, user=Depends(admin_only)):
     form = await request.form()
