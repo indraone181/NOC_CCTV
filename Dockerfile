@@ -10,7 +10,9 @@ RUN yarn build
 FROM python:3.11-slim
 WORKDIR /app
 COPY backend/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# emergentintegrations adalah paket internal Emergent — tidak dipakai di project ini, di-skip agar build works di luar platform
+RUN grep -v '^emergentintegrations' requirements.txt > requirements.docker.txt \
+    && pip install --no-cache-dir -r requirements.docker.txt
 COPY backend/ ./backend/
 COPY --from=frontend /build/frontend/build ./frontend_build
 EXPOSE 6678
