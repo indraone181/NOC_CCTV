@@ -20,8 +20,15 @@ Dashboard NOC CCTV dan ping jaringan dengan input IP, pengolahan data CCTV, lapo
 - CCTV/NVR registry seeded from provided sample data, status refresh, ping probe.
 - Overview metrics, reports, CSV export, responsive tactical NOC UI.
 - Dockerfile for port 6678.
+- Availability history snapshots, 30-second auto-refresh, and camera snapshot preview modal (2026-02-14).
 
 ## Prioritized backlog
 - P0: validate deployment image with MongoDB and connect external CCTV status API.
 - P1: persistent hourly availability history chart, PDF export, scheduled refresh.
 - P2: camera snapshot preview, audit log, password reset.
+
+## Latest implementation notes
+- `POST /api/cameras/refresh` records availability snapshots in `availability_history`.
+- `GET /api/reports/history` feeds the uptime/offline trend visualization.
+- Preview actions use each camera's configured `picture_url`; unavailable private camera URLs remain dependent on network reachability.
+- Automated refresh runs every 30 seconds while an authenticated operator/admin is on the dashboard.

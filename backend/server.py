@@ -53,6 +53,19 @@ class PingInput(BaseModel):
     ip: str
     port: int = 80
 
+async def record_availability(items):
+    total = len(items)
+    online = sum(item.get("status") == "online" for item in items)
+    now = datetime.now(timezone.utc)
+    await db.availability_history.insert_one({
+        "id": str(uuid.uuid4()),
+        "checked_at": now.isoformat(),
+        "online": online,
+        "offline": total - online,
+        "total": total,
+        "availability": round(online / total * 100, 1) if total else 0,
+    })
+
 def safe_user(user):
     return {"id": user.get("id"), "email": user["email"], "name": user.get("name", ""), "role": user.get("role", "operator")}
 
@@ -154,6 +167,7 @@ async def refresh_cameras(user=Depends(current_user)):
                     item["picture_url"] = by_ip[item["ip"]].get("picture_url", item.get("picture_url", ""))
                     item["last_checked"] = datetime.now(timezone.utc).isoformat()
                     await db.cameras.update_one({"id": item["id"]}, {"$set": {"status": item["status"], "picture_url": item["picture_url"], "last_checked": item["last_checked"]}})
+            await record_availability(items)
             return items
         except Exception:
             pass
@@ -162,7 +176,9 @@ async def refresh_cameras(user=Depends(current_user)):
         item.update({"status": "online" if online else "offline", "latency_ms": latency, "last_checked": datetime.now(timezone.utc).isoformat()})
         await db.cameras.update_one({"id": item["id"]}, {"$set": {"status": item["status"], "latency_ms": latency, "last_checked": item["last_checked"]}})
         return item
-    return await asyncio.gather(*[check(item) for item in items])
+    checked = await asyncio.gather(*[check(item) for item in items])
+    await record_availability(checked)
+    return checked
 
 @api.post("/ping")
 async def ping(payload: PingInput, user=Depends(current_user)):
@@ -176,6 +192,11 @@ async def summary(user=Depends(current_user)):
     cameras = await db.cameras.find({}, {"_id": 0}).to_list(1000)
     online = sum(c.get("status") == "online" for c in cameras)
     return {"total": len(cameras), "online": online, "offline": len(cameras) - online, "availability": round(online / len(cameras) * 100, 1) if cameras else 0, "checked_at": datetime.now(timezone.utc).isoformat()}
+
+@api.get("/reports/history")
+async def availability_history(user=Depends(current_user)):
+    history = await db.availability_history.find({}, {"_id": 0}).sort("checked_at", -1).to_list(48)
+    return list(reversed(history))
 
 @api.get("/reports/export")
 async def export_report(user=Depends(current_user)):
