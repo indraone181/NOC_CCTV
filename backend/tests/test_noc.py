@@ -314,11 +314,102 @@ def test_import_cameras_valid_csv(admin_client):
     body = r.json()
     assert body['inserted'] == 2
     assert body['skipped'] == 0
+    assert body.get('delimiter') == ','
+    assert 'errors' in body and isinstance(body['errors'], list)
     # cleanup
     cams = admin_client.get(f'{BASE_URL}/api/cameras').json()
     for c in cams:
         if c['name'].startswith('TEST_IMP_CAM'):
             admin_client.delete(f'{BASE_URL}/api/cameras/{c["id"]}')
+
+
+# ---------- CSV delimiter auto-detection ----------
+def _cleanup_cams(admin_client, prefixes):
+    cams = admin_client.get(f'{BASE_URL}/api/cameras').json()
+    for c in cams:
+        if any(c['name'].startswith(p) for p in prefixes):
+            admin_client.delete(f'{BASE_URL}/api/cameras/{c["id"]}')
+
+
+def test_import_cameras_semicolon_delimiter(admin_client):
+    import io as _io, csv as _csv
+    buf = _io.StringIO()
+    w = _csv.writer(buf, delimiter=';')
+    w.writerow(['name', 'ip', 'nvr', 'location', 'picture_url'])
+    w.writerow(['TEST_SEMI_CAM_A', '10.99.0.10', 'NVR-91', 'FA', ''])
+    w.writerow(['TEST_SEMI_CAM_B', '10.99.0.11', 'NVR-91', 'FA', ''])
+    csv_bytes = buf.getvalue().encode('utf-8')
+    try:
+        r = admin_client.post(f'{BASE_URL}/api/cameras/import', files={'file': ('cams.csv', csv_bytes, 'text/csv')})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body['delimiter'] == ';', f"expected ';', got {body}"
+        assert body['inserted'] == 2
+        assert body['skipped'] == 0
+        assert body['errors'] == []
+    finally:
+        _cleanup_cams(admin_client, ['TEST_SEMI_CAM_'])
+
+
+def test_import_cameras_comma_delimiter_returns_delimiter_key(admin_client):
+    csv_bytes = b"name,ip,nvr,location,picture_url\nTEST_COMMA_CAM_A,10.99.0.10,NVR-91,FA,\nTEST_COMMA_CAM_B,10.99.0.11,NVR-91,FA,\n"
+    try:
+        r = admin_client.post(f'{BASE_URL}/api/cameras/import', files={'file': ('cams.csv', csv_bytes, 'text/csv')})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body['delimiter'] == ','
+        assert body['inserted'] == 2
+    finally:
+        _cleanup_cams(admin_client, ['TEST_COMMA_CAM_'])
+
+
+def test_import_cameras_tab_delimiter(admin_client):
+    csv_bytes = b"name\tip\tnvr\tlocation\tpicture_url\nTEST_TAB_A\t10.99.0.20\tNVR-91\tFA\t\n"
+    try:
+        r = admin_client.post(f'{BASE_URL}/api/cameras/import', files={'file': ('cams.csv', csv_bytes, 'text/csv')})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body['delimiter'] == '\t', f"expected TAB delimiter, got {body}"
+        assert body['inserted'] == 1
+    finally:
+        _cleanup_cams(admin_client, ['TEST_TAB_'])
+
+
+def test_import_cameras_case_insensitive_and_bom(admin_client):
+    csv_bytes = "\ufeffName,IP,NVR,LOCATION,PICTURE_URL\nTEST_CASE_A,10.99.0.30,NVR-91,FA,\n".encode('utf-8')
+    try:
+        r = admin_client.post(f'{BASE_URL}/api/cameras/import', files={'file': ('cams.csv', csv_bytes, 'text/csv')})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body['inserted'] == 1, body
+        assert body['delimiter'] == ','
+    finally:
+        _cleanup_cams(admin_client, ['TEST_CASE_'])
+
+
+def test_import_cameras_missing_required_headers_returns_400(admin_client):
+    # missing 'name' and 'ip' columns
+    csv_bytes = b"foo;bar;baz\nx;y;z\n"
+    r = admin_client.post(f'{BASE_URL}/api/cameras/import', files={'file': ('cams.csv', csv_bytes, 'text/csv')})
+    assert r.status_code == 400, r.text
+    detail = r.json().get('detail', '')
+    # must mention detected delimiter (';') and detected columns
+    assert "';'" in detail or "delimiter=';'" in detail, f"detail should mention delimiter: {detail}"
+    assert 'foo' in detail, f"detail should list detected columns: {detail}"
+
+
+def test_import_cameras_empty_file_returns_400(admin_client):
+    r = admin_client.post(f'{BASE_URL}/api/cameras/import', files={'file': ('empty.csv', b'', 'text/csv')})
+    assert r.status_code == 400, r.text
+    assert 'kosong' in r.json().get('detail', '').lower()
+
+
+def test_import_template_still_ok(admin_client):
+    r = admin_client.get(f'{BASE_URL}/api/cameras/import/template')
+    assert r.status_code == 200
+    assert 'text/csv' in r.headers.get('content-type', '')
+    first_line = r.text.splitlines()[0]
+    assert first_line == 'name,ip,nvr,location,picture_url', f"unexpected header: {first_line}"
 
 
 def test_import_cameras_partial_skip(admin_client):

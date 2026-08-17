@@ -398,27 +398,45 @@ async def import_cameras(request: Request, user=Depends(admin_only)):
     try:
         content = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
-        content = raw.decode("utf-8", errors="ignore")
-    reader = csv.DictReader(io.StringIO(content))
+        content = raw.decode("latin-1", errors="ignore")
+    if not content.strip():
+        raise HTTPException(400, "File CSV kosong")
+    sample = content[:2048]
+    delimiter = ","
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        delimiter = dialect.delimiter
+    except csv.Error:
+        for d in (";", "\t", "|", ","):
+            first_line = sample.splitlines()[0] if sample else ""
+            if first_line.count(d) >= 1:
+                delimiter = d; break
+    reader = csv.DictReader(io.StringIO(content), delimiter=delimiter)
+    if not reader.fieldnames:
+        raise HTTPException(400, "Header CSV tidak terbaca")
+    normalized = {(f or "").strip().lower().lstrip("\ufeff"): f for f in reader.fieldnames}
+    if "name" not in normalized or "ip" not in normalized:
+        raise HTTPException(400, f"Header wajib 'name' dan 'ip' tidak ditemukan. Kolom terdeteksi: {list(reader.fieldnames)} (delimiter='{delimiter}')")
+    key = lambda k: normalized.get(k)
     inserted, skipped, errors = 0, 0, []
     for idx, row in enumerate(reader, start=2):
-        name = (row.get("name") or "").strip()
-        ip = (row.get("ip") or "").strip()
+        name = (row.get(key("name")) or "").strip()
+        ip = (row.get(key("ip")) or "").strip()
         if not name or not ip:
             skipped += 1; errors.append(f"Baris {idx}: name/ip kosong"); continue
         item = {
-            "id": (row.get("id") or "").strip() or str(uuid.uuid4()),
+            "id": (row.get(key("id")) or "").strip() or str(uuid.uuid4()) if key("id") else str(uuid.uuid4()),
             "name": name, "ip": ip,
-            "nvr": (row.get("nvr") or "NVR").strip(),
-            "location": (row.get("location") or "Main Site").strip(),
-            "picture_url": (row.get("picture_url") or "").strip(),
+            "nvr": (row.get(key("nvr")) or "NVR").strip() if key("nvr") else "NVR",
+            "location": (row.get(key("location")) or "Main Site").strip() if key("location") else "Main Site",
+            "picture_url": (row.get(key("picture_url")) or "").strip() if key("picture_url") else "",
             "status": "unknown", "latency_ms": None, "last_checked": None,
         }
         try:
             await db.cameras.insert_one(item); inserted += 1
         except Exception as exc:
             skipped += 1; errors.append(f"Baris {idx}: {str(exc)[:80]}")
-    return {"inserted": inserted, "skipped": skipped, "errors": errors[:10]}
+    return {"inserted": inserted, "skipped": skipped, "delimiter": delimiter, "errors": errors[:15]}
 
 @api.get("/users")
 async def users(user=Depends(admin_only)):
